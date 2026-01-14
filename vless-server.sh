@@ -1239,14 +1239,14 @@ add_xray_inbound_v2() {
 #═══════════════════════════════════════════════════════════════════════════════
 # 基础工具函数
 #═══════════════════════════════════════════════════════════════════════════════
-_line()  { echo -e "${D}─────────────────────────────────────────────${NC}"; }
-_dline() { echo -e "${C}═════════════════════════════════════════════${NC}"; }
-_info()  { echo -e "  ${C}▸${NC} $1"; }
-_ok()    { echo -e "  ${G}✓${NC} $1"; _log "OK" "$1"; }
-_err()   { echo -e "  ${R}✗${NC} $1"; _log "ERROR" "$1"; }
-_warn()  { echo -e "  ${Y}!${NC} $1"; _log "WARN" "$1"; }
-_item()  { echo -e "  ${G}$1${NC}) $2"; }
-_pause() { echo ""; read -rp "  按回车继续..."; }
+_line()  { echo -e "${D}─────────────────────────────────────────────${NC}" >&2; }
+_dline() { echo -e "${C}═════════════════════════════════════════════${NC}" >&2; }
+_info()  { echo -e "  ${C}▸${NC} $1" >&2; }
+_ok()    { echo -e "  ${G}✓${NC} $1" >&2; _log "OK" "$1"; }
+_err()   { echo -e "  ${R}✗${NC} $1" >&2; _log "ERROR" "$1"; }
+_warn()  { echo -e "  ${Y}!${NC} $1" >&2; _log "WARN" "$1"; }
+_item()  { echo -e "  ${G}$1${NC}) $2" >&2; }
+_pause() { echo "" >&2; read -rp "  按回车继续..."; }
 
 # URL 解码函数 (处理 %XX 编码的中文等字符)
 urldecode() {
@@ -1256,11 +1256,11 @@ urldecode() {
 }
 
 _header() {
-    clear; echo ""
+    clear; echo "" >&2
     _dline
-    echo -e "      ${W}多协议代理${NC} ${D}一键部署${NC} ${C}v${VERSION}${NC} ${Y}[服务端]${NC}"
-    echo -e "      ${D}作者: ${AUTHOR}  快捷命令: vless${NC}"
-    echo -e "      ${D}${REPO_URL}${NC}"
+    echo -e "      ${W}多协议代理${NC} ${D}一键部署${NC} ${C}v${VERSION}${NC} ${Y}[服务端]${NC}" >&2
+    echo -e "      ${D}作者: ${AUTHOR}  快捷命令: vless${NC}" >&2
+    echo -e "      ${D}${REPO_URL}${NC}" >&2
     _dline
 }
 
@@ -1321,7 +1321,10 @@ configure_dns64() {
         return 0  # IPv4 正常，无需配置
     fi
     
-    _warn "检测到纯 IPv6 环境，正在配置 DNS64..."
+    _warn "检测到纯 IPv6 环境，准备配置 DNS64..."
+    if ! _confirm_danger_action "配置 DNS64（修改 /etc/resolv.conf）" "系统 DNS 解析配置" "可能影响系统解析与网络访问"; then
+        return 1
+    fi
     
     # 备份原有配置
     if [[ -f /etc/resolv.conf ]] && [[ ! -f /etc/resolv.conf.bak ]]; then
@@ -1336,6 +1339,15 @@ nameserver 2a00:1098:2c::1
 EOF
     
     _ok "DNS64 配置完成 (Kasper Sky + Google DNS64 + Trex)"
+}
+
+# 检查 CA 证书是否存在
+_has_ca_bundle() {
+    local ca_file=""
+    for ca_file in "/etc/ssl/certs/ca-certificates.crt" "/etc/ssl/cert.pem" "/etc/pki/tls/certs/ca-bundle.crt"; do
+        [[ -s "$ca_file" ]] && return 0
+    done
+    return 1
 }
 
 # 检测并安装基础依赖
@@ -1355,21 +1367,29 @@ check_dependencies() {
             need_install=true
         fi
     done
+
+    if ! _has_ca_bundle; then
+        missing_deps+=("ca-certificates")
+        need_install=true
+    fi
     
     if [[ "$need_install" == "true" ]]; then
         _info "安装缺失的依赖: ${missing_deps[*]}..."
+        if ! _confirm_danger_action "安装系统依赖（${missing_deps[*]}）" "系统软件包与证书组件" "可能修改系统包版本，安装失败将影响后续功能"; then
+            return 1
+        fi
         
         case "$DISTRO" in
             alpine)
                 apk update >/dev/null 2>&1
-                apk add --no-cache curl jq openssl coreutils >/dev/null 2>&1
+                apk add --no-cache curl jq openssl coreutils ca-certificates >/dev/null 2>&1
                 ;;
             centos)
-                yum install -y curl jq openssl >/dev/null 2>&1
+                yum install -y curl jq openssl ca-certificates >/dev/null 2>&1
                 ;;
             debian|ubuntu)
                 apt-get update >/dev/null 2>&1
-                DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq openssl >/dev/null 2>&1
+                DEBIAN_FRONTEND=noninteractive apt-get install -y curl jq openssl ca-certificates >/dev/null 2>&1
                 ;;
         esac
         
@@ -1381,6 +1401,11 @@ check_dependencies() {
                 return 1
             fi
         done
+        if ! _has_ca_bundle; then
+            _err "依赖安装失败: ca-certificates"
+            _warn "请手动安装: ca-certificates"
+            return 1
+        fi
         _ok "依赖安装完成"
     fi
     return 0
@@ -1395,9 +1420,12 @@ _check_core_update_deps() {
             missing+=("$cmd")
         fi
     done
+    if ! _has_ca_bundle; then
+        missing+=("ca-certificates")
+    fi
     if [[ ${#missing[@]} -ne 0 ]]; then
         _err "缺少依赖: ${missing[*]}"
-        _warn "请先在主菜单执行“检测基础依赖”或手动安装依赖后重试"
+        _warn "请先安装缺失依赖或手动补齐后重试"
         return 1
     fi
     return 0
@@ -2717,9 +2745,9 @@ _issue_cert_dns() {
     local protocol="$3"
     
     echo ""
-    _line
+    _line >&2
     echo -e "  ${C}DNS-01 验证模式${NC}"
-    _line
+    _line >&2
     echo ""
     echo -e "  ${Y}支持的 DNS 服务商：${NC}"
     echo -e "  1) Cloudflare"
@@ -3529,9 +3557,12 @@ fix_selinux_context() {
 }
 
 # GitHub API 请求配置
-readonly GITHUB_API_PER_PAGE=30
+readonly GITHUB_API_PER_PAGE=10
 readonly VERSION_CACHE_DIR="/tmp/vless-version-cache"
 readonly VERSION_CACHE_TTL=3600  # 缓存1小时
+readonly SNELL_RELEASE_NOTES_URL="https://kb.nssurge.com/surge-knowledge-base/release-notes/snell.md"
+readonly SNELL_RELEASE_NOTES_ZH_URL="https://kb.nssurge.com/surge-knowledge-base/zh/release-notes/snell.md"
+readonly SNELL_DEFAULT_VERSION="5.0.1"
 
 # 获取文件修改时间戳（跨平台兼容）
 _get_file_mtime() {
@@ -3555,6 +3586,76 @@ _get_file_mtime() {
 # 初始化版本缓存目录
 _init_version_cache() {
     mkdir -p "$VERSION_CACHE_DIR" 2>/dev/null || true
+}
+
+_is_cache_fresh() {
+    local cache_file="$1"
+    [[ ! -f "$cache_file" ]] && return 1
+    local cache_time
+    cache_time=$(_get_file_mtime "$cache_file")
+    [[ -z "$cache_time" ]] && return 1
+    local current_time=$(date +%s)
+    local age=$((current_time - cache_time))
+    [[ $age -lt $VERSION_CACHE_TTL ]]
+}
+
+_get_snell_versions_from_kb() {
+    local limit="${1:-10}"
+    local result versions
+    result=$(curl -sL --connect-timeout 5 --max-time 10 "$SNELL_RELEASE_NOTES_URL" 2>/dev/null)
+    [[ -z "$result" ]] && return 1
+    versions=$(printf '%s\n' "$result" | sed -nE 's/^### v([0-9]+(\.[0-9]+)+(-[0-9A-Za-z.]+)?).*/\1/p' | head -n "$limit")
+    [[ -z "$versions" ]] && return 1
+    echo "$versions"
+}
+
+_get_snell_latest_version() {
+    local use_cache="${1:-true}"
+    local force="${2:-false}"
+    _init_version_cache
+
+    local cache_file="$VERSION_CACHE_DIR/surge-networks_snell"
+    if [[ "$force" != "true" ]] && _is_cache_fresh "$cache_file"; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+
+    if [[ "$force" != "true" && "$use_cache" == "true" ]]; then
+        local cached_version
+        if cached_version=$(_get_cached_version "surge-networks/snell"); then
+            if _is_plain_version "$cached_version"; then
+                echo "$cached_version"
+                return 0
+            fi
+        fi
+    fi
+
+    local version
+    version=$(_get_snell_versions_from_kb 1 | head -n 1)
+    [[ -z "$version" ]] && version="$SNELL_DEFAULT_VERSION"
+    _save_version_cache "surge-networks/snell" "$version"
+    echo "$version"
+}
+
+_get_snell_changelog_from_kb() {
+    local version="$1"
+    local result block
+    result=$(curl -sL --connect-timeout 5 --max-time 10 "$SNELL_RELEASE_NOTES_ZH_URL" 2>/dev/null)
+    [[ -z "$result" ]] && return 1
+    block=$(printf '%s\n' "$result" | awk -v ver="v$version" '
+        $0 ~ "^### "ver"($|[[:space:]])" {found=1; next}
+        found && $0 ~ "^### v" {exit}
+        found {print}
+    ')
+    [[ -z "$block" ]] && return 1
+    block=$(printf '%s\n' "$block" | awk '
+        /^\{%/ {next}
+        /^[[:space:]]*```/ {next}
+        /^[[:space:]]*$/ {next}
+        {print}
+    ')
+    [[ -z "$block" ]] && return 1
+    echo "$block"
 }
 
 # 获取缓存的版本号
@@ -3601,6 +3702,48 @@ _get_cached_prerelease_version() {
     return 1
 }
 
+# 强制获取缓存版本（忽略过期时间，用于网络失败时的降级）
+_force_get_cached_version() {
+    local repo="$1"
+    local cache_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')"
+    
+    if [[ -f "$cache_file" ]]; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
+# 强制获取测试版缓存（忽略过期时间，用于网络失败时的降级）
+_force_get_cached_prerelease_version() {
+    local repo="$1"
+    local cache_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_prerelease"
+    
+    if [[ -f "$cache_file" ]]; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+    return 1
+}
+
+# 获取缓存版本（优先新鲜缓存，无则回退旧缓存）
+_get_cached_version_with_fallback() {
+    local repo="$1"
+    local version=""
+    version=$(_get_cached_version "$repo" 2>/dev/null)
+    [[ -z "$version" ]] && version=$(_force_get_cached_version "$repo" 2>/dev/null)
+    [[ -n "$version" ]] && printf '%s' "$version"
+}
+
+# 获取缓存测试版版本（优先新鲜缓存，无则回退旧缓存）
+_get_cached_prerelease_with_fallback() {
+    local repo="$1"
+    local version=""
+    version=$(_get_cached_prerelease_version "$repo" 2>/dev/null)
+    [[ -z "$version" ]] && version=$(_force_get_cached_prerelease_version "$repo" 2>/dev/null)
+    [[ -n "$version" ]] && printf '%s' "$version"
+}
+
 # 保存版本号到缓存
 _save_version_cache() {
     local repo="$1"
@@ -3612,10 +3755,33 @@ _save_version_cache() {
 # 后台异步更新版本缓存
 _update_version_cache_async() {
     local repo="$1"
+    local cache_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')"
+    local unavailable_file="${cache_file}_unavailable"
+    if _is_cache_fresh "$cache_file"; then
+        return 0
+    fi
+    if [[ "$repo" == "surge-networks/snell" ]]; then
+        (
+            local version
+            version=$(_get_snell_versions_from_kb 1 | head -n 1)
+            rm -f "$unavailable_file" 2>/dev/null || true
+            [[ -n "$version" ]] && _save_version_cache "$repo" "$version"
+        ) &
+        return 0
+    fi
     (
         local version
-        version=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//')
+        local response http_code body
+        response=$(curl -sL --connect-timeout 5 --max-time 10 -w "\n%{http_code}" "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null)
+        http_code=$(printf '%s' "$response" | tail -n 1)
+        body=$(printf '%s' "$response" | sed '$d')
+        if [[ "$http_code" == "404" ]]; then
+            echo "not_found" > "$unavailable_file" 2>/dev/null || true
+            return 0
+        fi
+        version=$(printf '%s' "$body" | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//')
         if [[ -n "$version" ]]; then
+            rm -f "$unavailable_file" 2>/dev/null || true
             _save_version_cache "$repo" "$version"
         fi
     ) &
@@ -3625,10 +3791,28 @@ _update_version_cache_async() {
 _update_prerelease_cache_async() {
     local repo="$1"
     local cache_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_prerelease"
+    local unavailable_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_unavailable"
+    if _is_cache_fresh "$cache_file"; then
+        return 0
+    fi
+    if [[ "$repo" == "surge-networks/snell" ]]; then
+        echo "无" > "$cache_file" 2>/dev/null || true
+        rm -f "$unavailable_file" 2>/dev/null || true
+        return 0
+    fi
     (
         local version
-        version=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/releases?per_page=$GITHUB_API_PER_PAGE" 2>/dev/null | jq -r '[.[] | select(.prerelease == true)][0].tag_name // empty' 2>/dev/null | sed 's/^v//')
+        local response http_code body
+        response=$(curl -sL --connect-timeout 5 --max-time 10 -w "\n%{http_code}" "https://api.github.com/repos/$repo/releases?per_page=$GITHUB_API_PER_PAGE" 2>/dev/null)
+        http_code=$(printf '%s' "$response" | tail -n 1)
+        body=$(printf '%s' "$response" | sed '$d')
+        if [[ "$http_code" == "404" ]]; then
+            echo "not_found" > "$unavailable_file" 2>/dev/null || true
+            return 0
+        fi
+        version=$(printf '%s' "$body" | jq -r '[.[] | select(.prerelease == true)][0].tag_name // empty' 2>/dev/null | sed 's/^v//')
         if [[ -n "$version" ]]; then
+            rm -f "$unavailable_file" 2>/dev/null || true
             echo "$version" > "$cache_file" 2>/dev/null || true
         fi
     ) &
@@ -3639,6 +3823,9 @@ _update_all_versions_async() {
     local repo="$1"
     local stable_cache="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')"
     local prerelease_cache="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_prerelease"
+    if _is_cache_fresh "$stable_cache" && _is_cache_fresh "$prerelease_cache"; then
+        return 0
+    fi
     (
         # 一次请求获取最近10个版本（足够覆盖最新稳定版和测试版）
         local releases
@@ -3661,31 +3848,50 @@ _update_all_versions_async() {
 _get_latest_version() {
     local repo="$1"
     local use_cache="${2:-true}"
+    local force="${3:-false}"
 
     # 初始化缓存目录
     _init_version_cache
 
+    if [[ "$repo" == "surge-networks/snell" ]]; then
+        _get_snell_latest_version "$use_cache" "$force"
+        return $?
+    fi
+
+    local cache_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')"
+    if [[ "$force" != "true" ]] && _is_cache_fresh "$cache_file"; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+
     # 如果启用缓存,先尝试从缓存读取
-    if [[ "$use_cache" == "true" ]]; then
+    if [[ "$force" != "true" && "$use_cache" == "true" ]]; then
         local cached_version
         if cached_version=$(_get_cached_version "$repo"); then
             echo "$cached_version"
-            # 后台异步更新缓存
-            _update_version_cache_async "$repo"
             return 0
         fi
     fi
 
     # 缓存未命中或禁用缓存,执行网络请求
-    local result
-    result=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/releases/latest" 2>&1)
-    if [[ $? -ne 0 ]]; then
-        # 网络请求失败时不显示错误,返回空
+    local result curl_exit
+    result=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null)
+    curl_exit=$?
+    if [[ $curl_exit -ne 0 ]]; then
+        # 调试：输出 curl 失败原因
+        echo "[DEBUG] curl 失败 (退出码: $curl_exit)" >&2
         return 1
     fi
     local version
     version=$(echo "$result" | jq -r '.tag_name // empty' 2>/dev/null | sed 's/^v//')
+    local jq_exit=$?
     if [[ -z "$version" ]]; then
+        # 调试：输出 jq 解析失败原因
+        if [[ $jq_exit -ne 0 ]]; then
+            echo "[DEBUG] jq 解析失败 (退出码: $jq_exit)，响应前 200 字符:" >&2
+            echo "$result" | head -c 200 >&2
+            echo "" >&2
+        fi
         return 1
     fi
 
@@ -3760,36 +3966,34 @@ _get_latest_prerelease_version() {
     local repo="$1"
     local use_cache="${2:-true}"
     local cache_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_prerelease"
+    local force="${3:-false}"
 
     # 初始化缓存目录
     _init_version_cache
 
-    # 如果启用缓存,先尝试从缓存读取
-    if [[ "$use_cache" == "true" ]] && [[ -f "$cache_file" ]]; then
-        local cache_time
-        cache_time=$(_get_file_mtime "$cache_file")
-        if [[ -n "$cache_time" ]]; then
-            local current_time=$(date +%s)
-            local age=$((current_time - cache_time))
+    if [[ "$repo" == "surge-networks/snell" ]]; then
+        echo "无" > "$cache_file" 2>/dev/null || true
+        echo "无"
+        return 0
+    fi
 
-            if [[ $age -lt $VERSION_CACHE_TTL ]]; then
-                cat "$cache_file"
-                # 后台异步更新
-                (
-                    local version
-                    version=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/releases?per_page=$GITHUB_API_PER_PAGE" 2>/dev/null | jq -r '[.[] | select(.prerelease == true)][0].tag_name // empty' 2>/dev/null | sed 's/^v//')
-                    if [[ -n "$version" ]]; then
-                        echo "$version" > "$cache_file" 2>/dev/null || true
-                    fi
-                ) &
-                return 0
-            fi
+    if [[ "$force" != "true" ]] && _is_cache_fresh "$cache_file"; then
+        cat "$cache_file" 2>/dev/null
+        return 0
+    fi
+
+    # 如果启用缓存,先尝试从缓存读取
+    if [[ "$force" != "true" && "$use_cache" == "true" ]]; then
+        local cached_version
+        if cached_version=$(_get_cached_prerelease_version "$repo"); then
+            echo "$cached_version"
+            return 0
         fi
     fi
 
     # 缓存未命中,执行网络请求
     local result
-    result=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/releases?per_page=$GITHUB_API_PER_PAGE" 2>&1)
+    result=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/releases?per_page=$GITHUB_API_PER_PAGE" 2>/dev/null)
     if [[ $? -ne 0 ]]; then
         # 网络请求失败时静默返回（不显示错误）
         return 1
@@ -3810,32 +4014,117 @@ _get_latest_prerelease_version() {
 _get_release_versions() {
     local repo="$1" limit="${2:-10}" mode="${3:-stable}"
     local filter
+    # 统一空 mode 为 "all"
+    [[ -z "$mode" || "$mode" == "" ]] && mode="all"
+    local repo_safe cache_file
+    repo_safe=$(echo "$repo" | tr '/' '_')
+    cache_file="$VERSION_CACHE_DIR/${repo_safe}_releases_${mode}"
+    if [[ "$repo" == "surge-networks/snell" ]] && _is_cache_fresh "$cache_file"; then
+        local cached_versions
+        cached_versions=$(cat "$cache_file" 2>/dev/null)
+        if [[ -n "$cached_versions" ]]; then
+            echo "$cached_versions"
+            return 0
+        fi
+    fi
+    if _is_cache_fresh "$cache_file"; then
+        local cached_versions cached_count
+        cached_versions=$(cat "$cache_file" 2>/dev/null)
+        cached_count=$(printf '%s\n' "$cached_versions" | grep -c .)
+        if [[ "$cached_count" -ge "$limit" ]]; then
+            echo "$cached_versions"
+            return 0
+        fi
+    fi
+    if [[ "$repo" == "surge-networks/snell" ]]; then
+        local versions
+        if [[ "$mode" == "prerelease" || "$mode" == "test" || "$mode" == "beta" ]]; then
+            _err "Snell 无预发布版本"
+            return 1
+        fi
+        versions=$(_get_snell_versions_from_kb "$limit")
+        [[ -z "$versions" ]] && versions="$SNELL_DEFAULT_VERSION"
+        case "$mode" in
+            prerelease|test|beta) versions=$(printf '%s\n' "$versions" | grep -E '-' || true) ;;
+            stable) versions=$(printf '%s\n' "$versions" | grep -v -E '-' || true) ;;
+        esac
+        if [[ -z "$versions" ]]; then
+            _err "未找到符合条件的版本"
+            return 1
+        fi
+        echo "$versions" > "$cache_file" 2>/dev/null || true
+        echo "$versions"
+        return 0
+    fi
     case "$mode" in
         prerelease|test|beta) filter='[.[] | select(.prerelease == true)]' ;;
         stable) filter='[.[] | select(.prerelease == false)]' ;;
-        all) filter='[.[]]' ;;
+        all|"") filter='[.[]]' ;;
+        *) filter='[.[]]' ;;
     esac
     local result
-    result=$(curl -sL "https://api.github.com/repos/$repo/releases?per_page=$GITHUB_API_PER_PAGE" 2>&1)
+    result=$(curl -sL --max-time 30 --connect-timeout 10 "https://api.github.com/repos/$repo/releases?per_page=$GITHUB_API_PER_PAGE" 2>/dev/null)
     if [[ $? -ne 0 ]]; then
-        _err "网络请求失败,请检查网络连接"
+        _err "网络连接失败，无法访问 GitHub API"
         return 1
     fi
-    local versions
-    versions=$(echo "$result" | jq -r "$filter | .[0:$limit][] | .tag_name // empty" 2>/dev/null | sed 's/^v//')
+    if printf '%s' "$result" | grep -qiE 'API rate limit exceeded|rate limit'; then
+        _warn "API 限流，尝试从缓存获取版本列表..."
+        # 尝试从缓存读取版本列表
+        local fallback_files fallback
+        if [[ -f "$cache_file" ]]; then
+            cat "$cache_file"
+            return 0
+        fi
+
+        # 降级策略：尝试其他缓存文件
+        fallback_files=(
+            "$VERSION_CACHE_DIR/${repo_safe}_releases_all"
+            "$VERSION_CACHE_DIR/${repo_safe}_releases_stable"
+            "$VERSION_CACHE_DIR/${repo_safe}_releases_prerelease"
+        )
+        for fallback in "${fallback_files[@]}"; do
+            if [[ -f "$fallback" ]]; then
+                _warn "使用降级缓存: $(basename "$fallback")"
+                cat "$fallback"
+                return 0
+            fi
+        done
+
+        _err "缓存未找到，无法获取版本列表"
+        _warn "建议：等待 API 限流解除后重试，或先执行一次正常更新以创建缓存"
+        return 1
+    fi
+    local jq_output jq_status versions
+    jq_output=$(printf '%s' "$result" | jq -r "$filter | .[0:$limit][] | .tag_name // empty" 2>/dev/null)
+    jq_status=$?
+    if [[ $jq_status -ne 0 ]]; then
+        local snippet
+        snippet=$(printf '%s' "$result" | head -c 200)
+        _err "JSON 解析失败，响应片段: $snippet"
+        return 1
+    fi
+    versions=$(printf '%s\n' "$jq_output" | sed 's/^v//')
     if [[ -z "$versions" ]]; then
-        _err "未找到版本列表或解析失败"
+        _err "未找到符合条件的版本"
         return 1
     fi
+    # 保存到缓存供限流时使用
+    echo "$versions" > "$cache_file" 2>/dev/null || true
+
     echo "$versions"
 }
 
 # 获取版本变更日志
 _get_release_changelog() {
     local repo="$1" version="$2"
+    if [[ "$repo" == "surge-networks/snell" ]]; then
+        _get_snell_changelog_from_kb "$version"
+        return $?
+    fi
     local tag="v$version"
     local result
-    result=$(curl -sL "https://api.github.com/repos/$repo/releases/tags/$tag" 2>&1)
+    result=$(curl -sL "https://api.github.com/repos/$repo/releases/tags/$tag" 2>/dev/null)
     if [[ $? -ne 0 ]]; then
         return 1
     fi
@@ -3848,16 +4137,16 @@ _show_changelog_summary() {
     local changelog
     changelog=$(_get_release_changelog "$repo" "$version")
     if [[ -z "$changelog" ]]; then
-        echo "  (无变更日志)"
+        echo "  (无变更日志)" >&2
         return
     fi
 
-    echo -e "\n  ${C}变更摘要 (v${version})${NC}"
+    echo -e "\n  ${C}变更摘要 (v${version})${NC}" >&2
     _line
     echo "$changelog" | head -n "$max_lines" | while IFS= read -r line; do
         # 简化 Markdown 格式
         line=$(echo "$line" | sed 's/^### /  ▸ /; s/^## /▸ /; s/^\* /  • /; s/^- /  • /')
-        echo "$line"
+        echo "$line" >&2
     done
     _line
 }
@@ -3896,18 +4185,20 @@ _install_binary() {
         version="$version_override"
     else
         _info "$action $name (获取最新${channel_label})..."
-        # 实际安装/更新时不使用缓存，获取最新版本
+        # 实际安装/更新时优先使用缓存（1小时内有效），减少 API 请求频率
         if [[ "$channel" == "prerelease" || "$channel" == "test" || "$channel" == "beta" ]]; then
-            version=$(_get_latest_prerelease_version "$repo" "false")
+            version=$(_get_latest_prerelease_version "$repo" "true")
         else
-            version=$(_get_latest_version "$repo" "false")
+            version=$(_get_latest_version "$repo" "true")
         fi
+
+        # 如果获取失败（缓存过期且网络失败），尝试强制使用旧缓存
         if [[ -z "$version" ]]; then
             local cached_version=""
             if [[ "$channel" == "prerelease" || "$channel" == "test" || "$channel" == "beta" ]]; then
-                cached_version=$(_get_cached_prerelease_version "$repo" 2>/dev/null)
+                cached_version=$(_force_get_cached_prerelease_version "$repo" 2>/dev/null)
             else
-                cached_version=$(_get_cached_version "$repo" 2>/dev/null)
+                cached_version=$(_force_get_cached_version "$repo" 2>/dev/null)
             fi
             if [[ -n "$cached_version" ]]; then
                 _warn "获取最新${channel_label}失败，使用缓存版本 v$cached_version"
@@ -3917,7 +4208,7 @@ _install_binary() {
     fi
     if [[ -z "$version" ]]; then
         _err "获取 $name 版本失败"
-        _warn "请检查网络/证书/DNS，或先执行“检测基础依赖”"
+        _warn "请检查网络/证书/DNS，并确保系统依赖已安装"
         return 1
     fi
 
@@ -3997,17 +4288,157 @@ _core_channel_label() {
     local channel="$1"
     case "$channel" in
         prerelease|test|beta) echo "测试版" ;;
-        *) echo "稳定版" ;;
+        stable) echo "稳定版" ;;
+        "") echo "指定版本" ;;
+        *) echo "全部版本" ;;
+    esac
+}
+
+# Snell v5 版本获取
+_get_snell_v5_version() {
+    local version="未知"
+
+    if check_cmd snell-server-v5; then
+        local output status
+        output=$(snell-server-v5 --version 2>&1)
+        status=$?
+        if [[ $status -ne 0 ]]; then
+            version="未安装"
+        else
+            version=$(printf '%s\n' "$output" | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?' | head -n 1)
+            [[ -z "$version" ]] && version="未知"
+        fi
+    else
+        version="未安装"
+    fi
+
+    echo "$version"
+}
+
+# 公共方法：核心版本获取与状态判断
+_get_core_version() {
+    local core="$1"
+    local version="未知"
+
+    case "$core" in
+        xray)
+            if check_cmd xray; then
+                version=$(xray version 2>/dev/null | head -n 1 | awk '{print $2}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+                [[ -z "$version" ]] && version="未知"
+            else
+                version="未安装"
+            fi
+            ;;
+        sing-box)
+            if check_cmd sing-box; then
+                version=$(sing-box version 2>/dev/null | awk '{print $3}' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?')
+                [[ -z "$version" ]] && version="未知"
+            else
+                version="未安装"
+            fi
+            ;;
+        snell-server-v5)
+            version=$(_get_snell_v5_version)
+            ;;
+        snellv5|snell-v5)
+            version=$(_get_snell_v5_version)
+            ;;
+        *)
+            version="未知"
+            ;;
+    esac
+
+    echo "$version"
+}
+
+_is_version_unknown() {
+    [[ "$1" == "获取中..." || "$1" == "不可获取" || "$1" == "无" ]]
+}
+
+_is_plain_version() {
+    [[ "$1" =~ ^[0-9]+(\.[0-9]+)+$ ]]
+}
+
+_get_version_status() {
+    local current="$1"
+    local latest_stable="$2"
+    local latest_prerelease="$3"
+    local target=""
+
+    if [[ "$current" == *"-"* ]]; then
+        target="$latest_prerelease"
+    else
+        target="$latest_stable"
+    fi
+
+    if [[ -z "$target" ]] || _is_version_unknown "$target"; then
+        echo ""
+        return 0
+    fi
+
+    if [[ "$current" == "$target" ]]; then
+        # 最新版本不显示标识
+        echo ""
+    else
+        # [可更新] 使用亮橙色，显示后恢复默认样式
+        echo " \e[22;93m[可更新]\e[0m"
+    fi
+}
+
+_get_core_version_with_status() {
+    local core="$1"
+    local repo="$2"
+    local current latest_stable latest_prerelease prerelease_cache status
+
+    current=$(_get_core_version "$core")
+    if [[ "$current" == "未安装" || "$current" == "未知" ]]; then
+        echo "$current"
+        return 0
+    fi
+
+    latest_stable=$(_get_cached_version "$repo" 2>/dev/null)
+    [[ -z "$latest_stable" ]] && latest_stable="获取中..."
+
+    prerelease_cache="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_prerelease"
+    if [[ -f "$prerelease_cache" ]]; then
+        latest_prerelease=$(cat "$prerelease_cache" 2>/dev/null)
+    fi
+    [[ -z "$latest_prerelease" ]] && latest_prerelease="获取中..."
+
+    status=$(_get_version_status "$current" "$latest_stable" "$latest_prerelease")
+    echo "${current}${status}"
+}
+
+_confirm_danger_action() {
+    local action="$1" impact="$2" risk="$3"
+    echo "⚠️ 危险操作检测！"
+    echo "操作类型：$action"
+    echo "影响范围：$impact"
+    echo "风险评估：$risk"
+    echo ""
+    read -rp "请确认是否继续？[需要明确的\"是\"、\"确认\"、\"继续\"]: " confirm
+    case "$confirm" in
+        是|确认|继续) return 0 ;;
+        *) _warn "已取消"; return 1 ;;
     esac
 }
 
 _confirm_core_update() {
     local core="$1" channel="$2"
     local channel_label=$(_core_channel_label "$channel")
+    local risk_desc=""
+
+    # 根据 channel 生成不同的风险评估
+    if [[ "$channel" == "prerelease" || "$channel" == "test" || "$channel" == "beta" ]]; then
+        risk_desc="测试版可能不稳定，更新失败可能导致服务不可用"
+    else
+        risk_desc="更新失败可能导致服务不可用，建议先备份配置"
+    fi
+
     echo "⚠️ 危险操作检测！"
     echo "操作类型：更新 ${core} 内核（${channel_label}）"
     echo "影响范围：${core} 二进制与相关服务，更新后需重启服务"
-    echo "风险评估：测试版可能不稳定，更新失败可能导致服务不可用"
+    echo "风险评估：${risk_desc}"
     echo ""
     read -rp "请确认是否继续？[y/N]: " confirm
     case "${confirm,,}" in
@@ -4019,10 +4450,23 @@ _confirm_core_update() {
 _confirm_core_update_version() {
     local core="$1" channel="$2" version="$3"
     local channel_label=$(_core_channel_label "$channel")
+    local risk_desc=""
+    local label=""
+
+    # 根据 channel 生成不同的风险评估
+    if [[ "$channel" == "prerelease" || "$channel" == "test" || "$channel" == "beta" ]]; then
+        risk_desc="测试版可能不稳定，更新失败可能导致服务不可用"
+    else
+        risk_desc="更新失败可能导致服务不可用，建议先备份配置"
+    fi
+    if [[ -n "$channel" && -n "$channel_label" ]]; then
+        label="${channel_label} "
+    fi
+
     echo "⚠️ 危险操作检测！"
-    echo "操作类型：更新 ${core} 内核（${channel_label}，版本 v${version}）"
+    echo "操作类型：更新 ${core} 内核（${label}v${version}）"
     echo "影响范围：${core} 二进制与相关服务，更新后需重启服务"
-    echo "风险评估：测试版可能不稳定，更新失败可能导致服务不可用"
+    echo "风险评估：${risk_desc}"
     echo ""
     read -rp "请确认是否继续？[y/N]: " confirm
     case "${confirm,,}" in
@@ -4037,12 +4481,21 @@ _select_version_from_list() {
 
     _check_core_update_deps || return 1
 
+    # 初始化缓存目录
+    _init_version_cache
+
     # 获取当前版本
     local current_ver="未知"
     case "$name" in
-        Xray) check_cmd xray && current_ver=$(xray version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//') ;;
-        Sing-box) check_cmd sing-box && current_ver=$(sing-box version 2>/dev/null | awk '{print $3}') ;;
+        Xray) check_cmd xray && current_ver=$(xray version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1) ;;
+        Sing-box) check_cmd sing-box && current_ver=$(sing-box version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -n 1) ;;
+        "Snell v5") current_ver=$(_get_snell_v5_version) ;;
     esac
+    if [[ "$current_ver" != "未知" && "$current_ver" != "未安装" ]]; then
+        local ver_only
+        ver_only=$(printf '%s' "$current_ver" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?' | head -n 1)
+        [[ -n "$ver_only" ]] && current_ver="$ver_only"
+    fi
 
     local versions
     versions=$(_get_release_versions "$repo" "$limit" "$channel")
@@ -4051,8 +4504,8 @@ _select_version_from_list() {
         return 1
     fi
 
-    echo -e "  ${C}可选版本 (${channel_label})${NC}"
-    echo -e "  ${D}当前版本: ${current_ver}${NC}"
+    echo -e "  ${C}可选版本 (${channel_label})${NC}" >&2
+    echo -e "  ${D}当前版本: ${current_ver}${NC}" >&2
     _line
     local i=1
     local -a list=()
@@ -4060,16 +4513,16 @@ _select_version_from_list() {
         [[ -z "$v" ]] && continue
         local marker=""
         [[ "$v" == "$current_ver" ]] && marker=" ${Y}[当前]${NC}"
-        echo -e "  ${G}$i${NC}) v$v$marker"
+        echo -e "  ${G}$i${NC}) v$v$marker" >&2
         list[$i]="$v"
         ((i++))
     done <<< "$versions"
     _line
-    echo -e "  ${D}提示: 输入编号、版本号 (如 1.8.24) 或 0 返回${NC}"
+    echo -e "  ${D}提示: 输入编号、版本号 (如 1.8.24) 或 0 返回${NC}" >&2
     read -rp "  请选择: " choice
     if [[ "$choice" == "0" ]] || [[ -z "$choice" ]]; then
         [[ -z "$choice" ]] && _warn "已取消"
-        return 1
+        return 2
     fi
     if [[ "$choice" =~ ^[0-9]+$ ]]; then
         local selected="${list[$choice]}"
@@ -4085,31 +4538,59 @@ _select_version_from_list() {
     return 0
 }
 
+# 选择可用的备份目录
+_get_core_backup_dir() {
+    local -a candidates=(
+        "/var/backups/vless-cores"
+        "/usr/local/var/backups/vless-cores"
+    )
+    if [[ -n "$HOME" ]]; then
+        candidates+=("$HOME/.vless-backups/vless-cores")
+    fi
+
+    local dir
+    for dir in "${candidates[@]}"; do
+        if mkdir -p "$dir" 2>/dev/null && [[ -w "$dir" ]]; then
+            echo "$dir"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # 备份核心二进制文件
 _backup_core_binary() {
     local binary_name="$1"
     local binary_path="/usr/local/bin/$binary_name"
     [[ ! -f "$binary_path" ]] && return 0
 
-    local backup_dir="/var/backups/vless-cores"
-    mkdir -p "$backup_dir" 2>/dev/null || { _warn "创建备份目录失败"; return 1; }
+    local backup_dir
+    if ! backup_dir=$(_get_core_backup_dir); then
+        _warn "创建备份目录失败"
+        return 1
+    fi
 
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local current_ver
     case "$binary_name" in
         xray) current_ver=$(xray version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//') ;;
-        sing-box) current_ver=$(sing-box version 2>/dev/null | awk '{print $3}') ;;
+        sing-box) current_ver=$(sing-box version 2>/dev/null | head -n 1 | awk '{for (i=1;i<=NF;i++) if ($i ~ /^v?[0-9]/) {print $i; exit}}' | sed 's/^v//') ;;
+        snell-server-v5) current_ver=$(_get_snell_v5_version) ;;
     esac
     [[ -z "$current_ver" ]] && current_ver="unknown"
 
     local backup_name="${binary_name}_${current_ver}_${timestamp}"
-    if cp "$binary_path" "$backup_dir/$backup_name" 2>/dev/null; then
+    local cp_err
+    cp_err=$(cp "$binary_path" "$backup_dir/$backup_name" 2>&1)
+    if [[ $? -eq 0 ]]; then
         chmod 755 "$backup_dir/$backup_name"
         _info "已备份: $backup_name"
         echo "$backup_dir/$backup_name"
         return 0
     fi
-    _warn "备份失败"
+    cp_err=${cp_err//$'\n'/ }
+    _warn "备份失败${cp_err:+: $cp_err}"
     return 1
 }
 
@@ -4137,6 +4618,7 @@ _update_core_to_version() {
     case "$core" in
         Xray) binary_name="xray" ;;
         Sing-box) binary_name="sing-box" ;;
+        "Snell v5") binary_name="snell-server-v5" ;;
         *) _err "未知核心: $core"; return 1 ;;
     esac
 
@@ -4176,6 +4658,7 @@ _update_core_to_version() {
         case "$core" in
             Xray) _show_changelog_summary "XTLS/Xray-core" "$version" 8 ;;
             Sing-box) _show_changelog_summary "SagerNet/sing-box" "$version" 8 ;;
+            "Snell v5") _show_changelog_summary "surge-networks/snell" "$version" 8 ;;
         esac
 
         # 清理旧备份 (保留最近 3 个)
@@ -4212,16 +4695,18 @@ _update_core_versions_async() {
     local version_info_file="$VERSION_CACHE_DIR/.core_version_info"
 
     (
-        local xray_latest="" singbox_latest=""
+        local xray_latest="" singbox_latest="" snell_latest=""
 
         # 优先从缓存获取稳定版
         xray_latest=$(_get_cached_version "XTLS/Xray-core" 2>/dev/null)
         singbox_latest=$(_get_cached_version "SagerNet/sing-box" 2>/dev/null)
+        snell_latest=$(_get_cached_version "surge-networks/snell" 2>/dev/null)
 
         # 写入版本信息
         {
             echo "xray_latest=$xray_latest"
             echo "singbox_latest=$singbox_latest"
+            echo "snell_latest=$snell_latest"
         } > "$version_info_file" 2>/dev/null
 
         # 标记完成
@@ -4230,136 +4715,218 @@ _update_core_versions_async() {
         # 后台异步更新稳定版缓存
         _update_version_cache_async "XTLS/Xray-core"
         _update_version_cache_async "SagerNet/sing-box"
+        _update_version_cache_async "surge-networks/snell"
 
         # 后台异步更新测试版缓存（使用专用函数）
         # 注意：这些函数内部已经有缓存机制，这里只是触发后台更新
         (
             _get_latest_prerelease_version "XTLS/Xray-core" "false" >/dev/null 2>&1
             _get_latest_prerelease_version "SagerNet/sing-box" "false" >/dev/null 2>&1
+            _get_latest_prerelease_version "surge-networks/snell" "false" >/dev/null 2>&1
         ) &
     ) &
 }
 
+_refresh_core_versions_now() {
+    _info "重新获取版本..."
+    _get_latest_version "XTLS/Xray-core" "false" "true" >/dev/null 2>&1
+    _get_latest_prerelease_version "XTLS/Xray-core" "false" "true" >/dev/null 2>&1
+    _get_latest_version "SagerNet/sing-box" "false" "true" >/dev/null 2>&1
+    _get_latest_prerelease_version "SagerNet/sing-box" "false" "true" >/dev/null 2>&1
+    _get_latest_version "surge-networks/snell" "false" "true" >/dev/null 2>&1
+    _get_latest_prerelease_version "surge-networks/snell" "false" "true" >/dev/null 2>&1
+    local xray_current singbox_current
+    xray_current=$(_get_core_version "xray")
+    singbox_current=$(_get_core_version "sing-box")
+    _check_version_updates_async "$xray_current" "$singbox_current"
+    _version_check_started=1
+    _ok "版本信息已更新"
+}
+
 _show_core_versions() {
+    local filter="${1:-all}"  # 参数：xray, singbox, snellv5, all(默认)
+    
     # 初始化缓存目录
     _init_version_cache
 
-    # Xray 版本信息
-    # 输入示例: Xray 25.12.8 (Xray, Penetrates Everything.) 81f8f39 (go1.25.5 linux/amd64)
-    # 输出: 25.12.8
-    local xray_current="未安装"
-    if check_cmd xray; then
-        xray_current=$(xray version 2>/dev/null | head -n 1 | awk '{print $2}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
-        [[ -z "$xray_current" ]] && xray_current="未知"
-    fi
+    # 辅助函数定义
+    _is_numeric_version() {
+        [[ "$1" =~ ^[0-9]+(\.[0-9]+)*$ ]]
+    }
 
-    # Sing-box 版本信息
-    # 输入示例: sing-box version 1.12.14
-    # 输出: 1.12.14
-    local singbox_current="未安装"
-    if check_cmd sing-box; then
-        singbox_current=$(sing-box version 2>/dev/null | awk '{print $3}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
-        [[ -z "$singbox_current" ]] && singbox_current="未知"
-    fi
+    _version_ge() {
+        local v1="$1" v2="$2"
+        [[ "$v1" == "$v2" ]] && return 0
+        local IFS=.
+        local i v1_arr=($v1) v2_arr=($v2)
+        for ((i=0; i<${#v1_arr[@]} || i<${#v2_arr[@]}; i++)); do
+            local n1=${v1_arr[i]:-0} n2=${v2_arr[i]:-0}
+            ((n1 > n2)) && return 0
+            ((n1 < n2)) && return 1
+        done
+        return 0
+    }
 
-    # 优先从缓存获取最新版本（立即显示）
-    local xray_latest singbox_latest xray_prerelease singbox_prerelease
-    xray_latest=$(_get_cached_version "XTLS/Xray-core" 2>/dev/null)
-    [[ -z "$xray_latest" ]] && xray_latest="检查中..."
-
-    singbox_latest=$(_get_cached_version "SagerNet/sing-box" 2>/dev/null)
-    [[ -z "$singbox_latest" ]] && singbox_latest="检查中..."
-
-    # 获取测试版版本号（仅从缓存读取，避免同步网络请求阻塞）
-    local xray_prerelease singbox_prerelease
-    local xray_prerelease_cache="$VERSION_CACHE_DIR/XTLS_Xray-core_prerelease"
-    local singbox_prerelease_cache="$VERSION_CACHE_DIR/SagerNet_sing-box_prerelease"
-
-    # 直接从缓存文件读取（不触发网络请求）
-    if [[ -f "$xray_prerelease_cache" ]]; then
-        local cache_time
-        cache_time=$(_get_file_mtime "$xray_prerelease_cache")
-        if [[ -n "$cache_time" ]]; then
-            local current_time=$(date +%s)
-            local age=$((current_time - cache_time))
-            if [[ $age -lt $VERSION_CACHE_TTL ]]; then
-                xray_prerelease=$(cat "$xray_prerelease_cache" 2>/dev/null)
+    _prerelease_hint() {
+        local prerelease="$1" stable="$2"
+        _is_version_unknown "$prerelease" && return 0
+        local hint="（GitHub 预发布）"
+        if ! _is_version_unknown "$stable"; then
+            local pre_base="${prerelease%%-*}"
+            local stable_base="${stable%%-*}"
+            if _is_numeric_version "$pre_base" && _is_numeric_version "$stable_base"; then
+                if ! _version_ge "$pre_base" "$stable_base"; then
+                    hint="（GitHub 预发布，可能低于稳定版）"
+                fi
             fi
         fi
-    fi
-    [[ -z "$xray_prerelease" ]] && xray_prerelease="检查中..."
+        echo "$hint"
+    }
 
-    if [[ -f "$singbox_prerelease_cache" ]]; then
-        local cache_time
-        cache_time=$(_get_file_mtime "$singbox_prerelease_cache")
-        if [[ -n "$cache_time" ]]; then
-            local current_time=$(date +%s)
-            local age=$((current_time - cache_time))
-            if [[ $age -lt $VERSION_CACHE_TTL ]]; then
-                singbox_prerelease=$(cat "$singbox_prerelease_cache" 2>/dev/null)
+    # 显示 Xray 版本信息
+    if [[ "$filter" == "all" ]] || [[ "$filter" == "xray" ]]; then
+        local xray_current
+        xray_current=$(_get_core_version "xray")
+        
+        local xray_latest xray_prerelease
+        xray_latest=$(_get_cached_version_with_fallback "XTLS/Xray-core")
+        [[ -z "$xray_latest" ]] && xray_latest="获取中..."
+        
+        xray_prerelease=$(_get_cached_prerelease_with_fallback "XTLS/Xray-core")
+        [[ -z "$xray_prerelease" ]] && xray_prerelease="获取中..."
+
+        local xray_unavailable="$VERSION_CACHE_DIR/XTLS_Xray-core_unavailable"
+        if [[ -f "$xray_unavailable" ]]; then
+            [[ "$xray_latest" == "获取中..." ]] && xray_latest="不可获取"
+            [[ "$xray_prerelease" == "获取中..." ]] && xray_prerelease="不可获取"
+        fi
+        
+        local xray_prerelease_hint
+        xray_prerelease_hint=$(_prerelease_hint "$xray_prerelease" "$xray_latest")
+        
+        echo -e "  ${W}Xray${NC}"
+        if [[ "$xray_current" == "未安装" ]]; then
+            echo -e "    ${W}当前版本:${NC} ${D}${xray_current}${NC}"
+        else
+            local xray_status=$(_get_version_status "$xray_current" "$xray_latest" "$xray_prerelease")
+            echo -e "    ${W}当前版本:${NC} ${G}v${xray_current}${NC}${xray_status}"
+        fi
+        
+        if ! _is_version_unknown "$xray_latest"; then
+            echo -e "    ${NC}${W}稳定版本:${NC} ${C}v${xray_latest}${NC}"
+        else
+            echo -e "    ${NC}${W}稳定版本:${NC} ${D}${xray_latest}${NC}"
+        fi
+        
+        if ! _is_version_unknown "$xray_prerelease"; then
+            echo -e "    ${W}预发布版本:${NC} ${M}v${xray_prerelease}${NC}${D}${xray_prerelease_hint}${NC}"
+        else
+            echo -e "    ${W}预发布版本:${NC} ${D}${xray_prerelease}${NC}"
+        fi
+        
+        # 如果还要显示 Sing-box，添加空行分隔
+        [[ "$filter" == "all" ]] && echo ""
+    fi
+
+    # 显示 Sing-box 版本信息
+    if [[ "$filter" == "all" ]] || [[ "$filter" == "singbox" ]]; then
+        local singbox_current
+        singbox_current=$(_get_core_version "sing-box")
+        
+        local singbox_latest singbox_prerelease
+        singbox_latest=$(_get_cached_version_with_fallback "SagerNet/sing-box")
+        [[ -z "$singbox_latest" ]] && singbox_latest="获取中..."
+        
+        singbox_prerelease=$(_get_cached_prerelease_with_fallback "SagerNet/sing-box")
+        [[ -z "$singbox_prerelease" ]] && singbox_prerelease="获取中..."
+
+        local singbox_unavailable="$VERSION_CACHE_DIR/SagerNet_sing-box_unavailable"
+        if [[ -f "$singbox_unavailable" ]]; then
+            [[ "$singbox_latest" == "获取中..." ]] && singbox_latest="不可获取"
+            [[ "$singbox_prerelease" == "获取中..." ]] && singbox_prerelease="不可获取"
+        fi
+        
+        local singbox_prerelease_hint
+        singbox_prerelease_hint=$(_prerelease_hint "$singbox_prerelease" "$singbox_latest")
+        
+        echo -e "  ${W}Sing-box${NC}"
+        if [[ "$singbox_current" == "未安装" ]]; then
+            echo -e "    ${W}当前版本:${NC} ${D}${singbox_current}${NC}"
+        else
+            local singbox_status=$(_get_version_status "$singbox_current" "$singbox_latest" "$singbox_prerelease")
+            echo -e "    ${W}当前版本:${NC} ${G}v${singbox_current}${NC}${singbox_status}"
+        fi
+        
+        if ! _is_version_unknown "$singbox_latest"; then
+            echo -e "    ${NC}${W}稳定版本:${NC} ${C}v${singbox_latest}${NC}"
+        else
+            echo -e "    ${NC}${W}稳定版本:${NC} ${D}${singbox_latest}${NC}"
+        fi
+        
+        if ! _is_version_unknown "$singbox_prerelease"; then
+            echo -e "    ${W}预发布版本:${NC} ${M}v${singbox_prerelease}${NC}${D}${singbox_prerelease_hint}${NC}"
+        else
+            echo -e "    ${W}预发布版本:${NC} ${D}${singbox_prerelease}${NC}"
+        fi
+
+        # 如果还要显示 Snell v5，添加空行分隔
+        [[ "$filter" == "all" ]] && echo ""
+    fi
+
+    # 显示 Snell v5 版本信息
+    if [[ "$filter" == "all" ]] || [[ "$filter" == "snellv5" ]]; then
+        local snell_current
+        snell_current=$(_get_snell_v5_version)
+        
+        local snell_latest snell_prerelease
+        snell_latest=$(_get_cached_version "surge-networks/snell" 2>/dev/null)
+        [[ -z "$snell_latest" ]] && snell_latest="$SNELL_DEFAULT_VERSION"
+        ! _is_plain_version "$snell_latest" && snell_latest="$SNELL_DEFAULT_VERSION"
+        
+        local snell_prerelease_cache="$VERSION_CACHE_DIR/surge-networks_snell_prerelease"
+        if [[ -f "$snell_prerelease_cache" ]]; then
+            local cache_time
+            cache_time=$(_get_file_mtime "$snell_prerelease_cache")
+            if [[ -n "$cache_time" ]]; then
+                local current_time=$(date +%s)
+                local age=$((current_time - cache_time))
+                if [[ $age -lt $VERSION_CACHE_TTL ]]; then
+                    snell_prerelease=$(cat "$snell_prerelease_cache" 2>/dev/null)
+                fi
             fi
         fi
-    fi
-    [[ -z "$singbox_prerelease" ]] && singbox_prerelease="检查中..."
-
-    # 显示版本信息
-    echo -e "  ${W}Xray${NC}"
-    if [[ "$xray_current" == "未安装" ]]; then
-        echo -e "    当前版本: ${D}${xray_current}${NC}"
-    else
-        local xray_status=""
-        if [[ "$xray_latest" != "检查中..." ]]; then
-            if [[ "$xray_current" == "$xray_latest" ]]; then
-                xray_status=" ${G}[最新]${NC}"
-            else
-                xray_status=" ${Y}[可更新]${NC}"
-            fi
+        [[ -z "$snell_prerelease" ]] && snell_prerelease="无"
+        
+        echo -e "  ${W}Snell v5${NC}"
+        if [[ "$snell_current" == "未安装" ]]; then
+            echo -e "    ${W}当前版本:${NC} ${D}${snell_current}${NC}"
+        else
+            local snell_status=$(_get_version_status "$snell_current" "$snell_latest" "$snell_prerelease")
+            echo -e "    ${W}当前版本:${NC} ${G}v${snell_current}${NC}${snell_status}"
         fi
-        echo -e "    当前版本: ${G}v${xray_current}${NC}${xray_status}"
-    fi
-
-    if [[ "$xray_latest" != "检查中..." ]]; then
-        echo -e "    稳定版本: ${C}v${xray_latest}${NC}"
-    else
-        echo -e "    稳定版本: ${D}${xray_latest}${NC}"
-    fi
-
-    if [[ "$xray_prerelease" != "检查中..." ]]; then
-        echo -e "    测试版本: ${M}v${xray_prerelease}${NC}"
-    else
-        echo -e "    测试版本: ${D}${xray_prerelease}${NC}"
-    fi
-
-    echo ""
-    echo -e "  ${W}Sing-box${NC}"
-    if [[ "$singbox_current" == "未安装" ]]; then
-        echo -e "    当前版本: ${D}${singbox_current}${NC}"
-    else
-        local singbox_status=""
-        if [[ "$singbox_latest" != "检查中..." ]]; then
-            if [[ "$singbox_current" == "$singbox_latest" ]]; then
-                singbox_status=" ${G}[最新]${NC}"
-            else
-                singbox_status=" ${Y}[可更新]${NC}"
-            fi
+        
+        if ! _is_version_unknown "$snell_latest"; then
+            echo -e "    ${NC}${W}稳定版本:${NC} ${C}v${snell_latest}${NC}"
+        else
+            echo -e "    ${NC}${W}稳定版本:${NC} ${D}${snell_latest}${NC}"
         fi
-        echo -e "    当前版本: ${G}v${singbox_current}${NC}${singbox_status}"
-    fi
-
-    if [[ "$singbox_latest" != "检查中..." ]]; then
-        echo -e "    稳定版本: ${C}v${singbox_latest}${NC}"
-    else
-        echo -e "    稳定版本: ${D}${singbox_latest}${NC}"
-    fi
-
-    if [[ "$singbox_prerelease" != "检查中..." ]]; then
-        echo -e "    测试版本: ${M}v${singbox_prerelease}${NC}"
-    else
-        echo -e "    测试版本: ${D}${singbox_prerelease}${NC}"
     fi
 
     # 启动后台异步更新（为下次访问准备）
-    _update_core_versions_async
+    if [[ "$filter" == "all" ]] || [[ "$filter" == "xray" ]]; then
+        _update_version_cache_async "XTLS/Xray-core"
+        _update_prerelease_cache_async "XTLS/Xray-core"
+    fi
+    
+    if [[ "$filter" == "all" ]] || [[ "$filter" == "singbox" ]]; then
+        _update_version_cache_async "SagerNet/sing-box"
+        _update_prerelease_cache_async "SagerNet/sing-box"
+    fi
+
+    if [[ "$filter" == "all" ]] || [[ "$filter" == "snellv5" ]]; then
+        _update_version_cache_async "surge-networks/snell"
+        _update_prerelease_cache_async "surge-networks/snell"
+    fi
 }
 
 update_xray_core() {
@@ -4385,6 +4952,11 @@ update_xray_core() {
 
     if install_xray "$channel" "true"; then
         _ok "Xray 内核已更新"
+        local new_version
+        new_version=$(xray version 2>/dev/null | awk 'NR==1{print $2}' | sed 's/^v//')
+        if [[ -n "$new_version" && "$is_new_install" != "true" ]]; then
+            _show_changelog_summary "XTLS/Xray-core" "$new_version" 10
+        fi
         if [[ "$need_restart" == "true" ]]; then
             _info "重新启动 vless-reality 服务..."
             if svc start vless-reality 2>/dev/null; then
@@ -4432,6 +5004,11 @@ update_singbox_core() {
 
     if install_singbox "$channel" "true"; then
         _ok "Sing-box 内核已更新"
+        local new_version
+        new_version=$(sing-box version 2>/dev/null | awk '{print $3}')
+        if [[ -n "$new_version" && "$is_new_install" != "true" ]]; then
+            _show_changelog_summary "SagerNet/sing-box" "$new_version" 10
+        fi
         if [[ "$need_restart" == "true" ]]; then
             _info "重新启动 vless-singbox 服务..."
             if svc start vless-singbox 2>/dev/null; then
@@ -4456,131 +5033,244 @@ update_singbox_core() {
     return 1
 }
 
-update_xray_core_custom() {
-    local channel=""
-    _header
-    echo -e "  ${W}Xray 指定版本更新${NC}"
-    _line
-    _show_core_versions
-    _line
+update_snell_v5_core() {
+    local channel="${1:-stable}"
+    _check_core_update_deps || return 1
+    _confirm_core_update "Snell v5" "$channel" || return 1
 
-    _item "1" "稳定版列表"
-    _item "2" "测试版列表"
-    _item "0" "返回"
+    local is_new_install=false
+    if ! check_cmd snell-server-v5; then
+        _warn "未检测到 Snell v5，将执行安装"
+        is_new_install=true
+    fi
+
+    local need_restart=false service_running=false
+    if svc status vless-snell-v5 2>/dev/null; then
+        service_running=true
+        need_restart=true
+        _info "停止 vless-snell-v5 服务..."
+        if ! svc stop vless-snell-v5 2>/dev/null; then
+            _warn "停止服务失败，继续更新"
+        fi
+    fi
+
+    if install_snell_v5 "$channel" "true"; then
+        _ok "Snell v5 内核已更新"
+        local new_version
+        new_version=$(_get_snell_v5_version)
+        if [[ -n "$new_version" && "$new_version" != "未安装" && "$new_version" != "未知" && "$is_new_install" != "true" ]]; then
+            _show_changelog_summary "surge-networks/snell" "$new_version" 10
+        fi
+        if [[ "$need_restart" == "true" ]]; then
+            _info "重新启动 vless-snell-v5 服务..."
+            if svc start vless-snell-v5 2>/dev/null; then
+                _ok "服务已启动"
+            else
+                _err "服务启动失败，请手动检查配置: svc start vless-snell-v5"
+                return 1
+            fi
+        fi
+        return 0
+    fi
+
+    _err "Snell v5 内核更新失败"
+    if [[ "$service_running" == "true" ]]; then
+        _warn "尝试恢复服务..."
+        if svc start vless-snell-v5 2>/dev/null; then
+            _ok "服务已恢复"
+        else
+            _err "服务恢复失败，请手动检查: svc start vless-snell-v5"
+        fi
+    fi
+    return 1
+}
+
+update_xray_core_custom() {
+    _header
+    echo -e "  ${W}Xray 安装指定版本${NC}"
     _line
-    read -rp "  请选择: " choice
-    case "$choice" in
-        1) channel="stable" ;;
-        2) channel="prerelease" ;;
-        0) return ;;
-        *) _err "无效选择"; return 1 ;;
-    esac
+    _show_core_versions "xray"
+    _line
 
     if ! check_cmd xray; then
         _warn "未检测到 Xray，将执行安装"
     fi
 
     local version
-    version=$(_select_version_from_list "XTLS/Xray-core" "$channel" "Xray") || return 1
-    _update_core_to_version "Xray" "$channel" "$version" "vless-reality" "install_xray"
+    version=$(_select_version_from_list "XTLS/Xray-core" "all" "Xray" 10)
+    local select_rc=$?
+    if [[ $select_rc -ne 0 ]]; then
+        [[ $select_rc -eq 2 ]] && { _SKIP_PAUSE_ONCE=1; return 0; }
+        return 1
+    fi
+    _update_core_to_version "Xray" "" "$version" "vless-reality" "install_xray"
 }
 
 update_singbox_core_custom() {
-    local channel=""
     _header
-    echo -e "  ${W}Sing-box 指定版本更新${NC}"
+    echo -e "  ${W}Sing-box 安装指定版本${NC}"
     _line
-    _show_core_versions
+    _show_core_versions "singbox"
     _line
-
-    _item "1" "稳定版列表"
-    _item "2" "测试版列表"
-    _item "0" "返回"
-    _line
-    read -rp "  请选择: " choice
-    case "$choice" in
-        1) channel="stable" ;;
-        2) channel="prerelease" ;;
-        0) return ;;
-        *) _err "无效选择"; return 1 ;;
-    esac
 
     if ! check_cmd sing-box; then
         _warn "未检测到 Sing-box，将执行安装"
     fi
 
     local version
-    version=$(_select_version_from_list "SagerNet/sing-box" "$channel" "Sing-box") || return 1
-    _update_core_to_version "Sing-box" "$channel" "$version" "vless-singbox" "install_singbox"
+    version=$(_select_version_from_list "SagerNet/sing-box" "all" "Sing-box" 10)
+    local select_rc=$?
+    if [[ $select_rc -ne 0 ]]; then
+        [[ $select_rc -eq 2 ]] && { _SKIP_PAUSE_ONCE=1; return 0; }
+        return 1
+    fi
+    _update_core_to_version "Sing-box" "" "$version" "vless-singbox" "install_singbox"
+}
+
+update_snell_v5_core_custom() {
+    _header
+    echo -e "  ${W}Snell v5 安装指定版本${NC}"
+    _line
+    _show_core_versions "snellv5"
+    _line
+
+    if ! check_cmd snell-server-v5; then
+        _warn "未检测到 Snell v5，将执行安装"
+    fi
+
+    local version
+    version=$(_select_version_from_list "surge-networks/snell" "all" "Snell v5" 10)
+    local select_rc=$?
+    if [[ $select_rc -ne 0 ]]; then
+        [[ $select_rc -eq 2 ]] && { _SKIP_PAUSE_ONCE=1; return 0; }
+        return 1
+    fi
+    _update_core_to_version "Snell v5" "" "$version" "vless-snell-v5" "install_snell_v5"
+}
+
+_update_core_with_channel_select() {
+    local core_name="$1"
+    local repo="$2"
+    local binary_name="$3"
+    local service_name="$4"
+    local install_func="$5"
+    
+    # 获取版本信息
+    local current_ver stable_ver prerelease_ver
+    current_ver=$(_get_core_version "$binary_name")
+    stable_ver=$(_get_cached_version_with_fallback "$repo")
+    [[ -z "$stable_ver" ]] && stable_ver="获取中..."
+    
+    prerelease_ver=$(_get_cached_prerelease_with_fallback "$repo")
+    [[ -z "$prerelease_ver" ]] && prerelease_ver="获取中..."
+    
+    if [[ "$repo" == "surge-networks/snell" ]]; then
+        [[ "$stable_ver" == "获取中..." ]] && stable_ver="$SNELL_DEFAULT_VERSION"
+        [[ "$prerelease_ver" == "获取中..." ]] && prerelease_ver="无"
+        ! _is_plain_version "$stable_ver" && stable_ver="$SNELL_DEFAULT_VERSION"
+    else
+        local unavailable_file="$VERSION_CACHE_DIR/$(echo "$repo" | tr '/' '_')_unavailable"
+        if [[ -f "$unavailable_file" ]]; then
+            [[ "$stable_ver" == "获取中..." ]] && stable_ver="不可获取"
+            [[ "$prerelease_ver" == "获取中..." ]] && prerelease_ver="不可获取"
+        fi
+    fi
+
+    if [[ "$core_name" == "Snell v5" ]]; then
+        _header
+        echo -e "  ${W}${core_name} 版本选择${NC}"
+        _line
+        echo -e "  ${W}当前版本:${NC} ${G}${current_ver}${NC}"
+        echo ""
+        local stable_label="v${stable_ver}"
+        _is_version_unknown "$stable_ver" && stable_label="${stable_ver}"
+        _item "1" "稳定版 (${stable_label})"
+        _item "2" "指定版本"
+        _item "0" "返回"
+        _line
+
+        read -rp "  请选择: " channel_choice
+        case "$channel_choice" in
+            1) update_snell_v5_core "stable" ;;
+            2) update_snell_v5_core_custom ;;
+            0) return 0 ;;
+            *) _err "无效选择"; return 1 ;;
+        esac
+        return 0
+    fi
+    
+    # 显示选择菜单
+    _header
+    echo -e "  ${W}${core_name} 版本选择${NC}"
+    _line
+    echo -e "  ${W}当前版本:${NC} ${G}${current_ver}${NC}"
+    echo ""
+    local stable_label="v${stable_ver}"
+    local prerelease_label="v${prerelease_ver}"
+    _is_version_unknown "$stable_ver" && stable_label="$stable_ver"
+    _is_version_unknown "$prerelease_ver" && prerelease_label="$prerelease_ver"
+    _item "1" "稳定版 (${stable_label})"
+    _item "2" "预发布版 (${prerelease_label})"
+    _item "3" "指定版本"
+    _item "0" "返回"
+    _line
+    
+    read -rp "  请选择: " channel_choice
+    local channel=""
+    case "$channel_choice" in
+        1) channel="stable" ;;
+        2) channel="prerelease" ;;
+        3)
+            case "$core_name" in
+                Xray) update_xray_core_custom ;;
+                Sing-box) update_singbox_core_custom ;;
+                *) _err "不支持的核心"; return 1 ;;
+            esac
+            return 0
+            ;;
+        0) return 0 ;;
+        *) _err "无效选择"; return 1 ;;
+    esac
+    
+    # 执行更新
+    case "$core_name" in
+        Xray) update_xray_core "$channel" ;;
+        Sing-box) update_singbox_core "$channel" ;;
+        "Snell v5") update_snell_v5_core "$channel" ;;
+    esac
 }
 
 update_core_menu() {
     while true; do
         _header
-        echo -e "  ${W}核心版本管理 (Xray/Sing-box)${NC}"
+        echo -e "  ${W}核心版本管理 (Xray/Sing-box/Snell v5)${NC}"
         _line
         _show_core_versions
         _line
         
-        _item "1" "更新 Xray (稳定版)"
-        _item "2" "更新 Xray (测试版)"
-        _item "3" "更新 Sing-box (稳定版)"
-        _item "4" "更新 Sing-box (测试版)"
-        _item "5" "更新全部 (稳定版)"
-        _item "6" "更新全部 (测试版)"
-        _item "7" "指定版本更新 Xray"
-        _item "8" "指定版本更新 Sing-box"
+        _item "1" "更新 Xray"
+        _item "2" "更新 Sing-box"
+        _item "3" "更新 Snell v5"
+        _item "4" "重新获取版本"
         _item "0" "返回"
         _line
         
         read -rp "  请选择: " choice
         case "$choice" in
-            1) update_xray_core "stable" ;;
-            2) update_xray_core "prerelease" ;;
-            3) update_singbox_core "stable" ;;
-            4) update_singbox_core "prerelease" ;;
-            5)
-                echo -e "\n${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                echo -e "  ${W}批量更新进度 (稳定版)${NC}"
-                echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                local xray_result=0 singbox_result=0
-                echo -e "  [1/2] 更新 Xray..."
-                update_xray_core "stable" || xray_result=$?
-                echo -e "\n  [2/2] 更新 Sing-box..."
-                update_singbox_core "stable" || singbox_result=$?
-                echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                if [[ $xray_result -eq 0 ]] && [[ $singbox_result -eq 0 ]]; then
-                    echo -e "  ${G}✓${NC} 批量更新完成"
-                else
-                    echo -e "  ${Y}⚠${NC} 批量更新完成（部分失败）"
-                    [[ $xray_result -ne 0 ]] && echo -e "    ${R}✗${NC} Xray 更新失败"
-                    [[ $singbox_result -ne 0 ]] && echo -e "    ${R}✗${NC} Sing-box 更新失败"
-                fi
-                ;;
-            6)
-                echo -e "\n${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                echo -e "  ${W}批量更新进度 (测试版)${NC}"
-                echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                local xray_result=0 singbox_result=0
-                echo -e "  [1/2] 更新 Xray..."
-                update_xray_core "prerelease" || xray_result=$?
-                echo -e "\n  [2/2] 更新 Sing-box..."
-                update_singbox_core "prerelease" || singbox_result=$?
-                echo -e "${C}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-                if [[ $xray_result -eq 0 ]] && [[ $singbox_result -eq 0 ]]; then
-                    echo -e "  ${G}✓${NC} 批量更新完成"
-                else
-                    echo -e "  ${Y}⚠${NC} 批量更新完成（部分失败）"
-                    [[ $xray_result -ne 0 ]] && echo -e "    ${R}✗${NC} Xray 更新失败"
-                    [[ $singbox_result -ne 0 ]] && echo -e "    ${R}✗${NC} Sing-box 更新失败"
-                fi
-                ;;
-            7) update_xray_core_custom ;;
-            8) update_singbox_core_custom ;;
-            0) return ;;
+            1) _update_core_with_channel_select "Xray" "XTLS/Xray-core" "xray" "vless-reality" "install_xray" ;;
+            2) _update_core_with_channel_select "Sing-box" "SagerNet/sing-box" "sing-box" "vless-singbox" "install_singbox" ;;
+            3) _update_core_with_channel_select "Snell v5" "surge-networks/snell" "snell-server-v5" "vless-snell-v5" "install_snell_v5" ;;
+            4) _refresh_core_versions_now ;;
+            0) break ;;
             *) _err "无效选择" ;;
         esac
-        _pause
+        if [[ "$choice" != "0" ]]; then
+            if [[ -n "$_SKIP_PAUSE_ONCE" ]]; then
+                _SKIP_PAUSE_ONCE=""
+            else
+                _pause
+            fi
+        fi
     done
 }
 
@@ -5095,14 +5785,47 @@ install_snell() {
 
 # 安装 Snell v5
 install_snell_v5() {
-    check_cmd snell-server-v5 && { _ok "Snell v5 已安装"; return 0; }
+    local channel="${1:-stable}"
+    local force="${2:-false}"
+    local version_override="${3:-}"
+    local exists=false action="安装" channel_label="稳定版"
+
+    if check_cmd snell-server-v5; then
+        exists=true
+        [[ "$force" != "true" ]] && { _ok "Snell v5 已安装"; return 0; }
+    fi
+    [[ "$exists" == "true" ]] && action="更新"
+    if [[ "$channel" == "prerelease" || "$channel" == "test" || "$channel" == "beta" ]]; then
+        _warn "Snell v5 未提供预发布版本，使用稳定版"
+        channel="stable"
+    fi
+
     local sarch=$(_map_arch "amd64:aarch64:armv7l") || { _err "不支持的架构"; return 1; }
     # Alpine 需要安装 upx 来解压 UPX 压缩的二进制 (musl 不兼容 UPX stub)
     if [[ "$DISTRO" == "alpine" ]]; then
         apk add --no-cache upx &>/dev/null
     fi
-    local version=$(_get_latest_version "surge-networks/snell"); [[ -z "$version" ]] && version="5.0.1"
-    _info "安装 Snell v$version..."
+    local version=""
+    if [[ -n "$version_override" ]]; then
+        _info "$action Snell v5 (版本 v$version_override)..."
+        version="$version_override"
+    else
+        _info "$action Snell v5 (获取最新${channel_label})..."
+        version=$(_get_snell_latest_version "true")
+        if [[ -z "$version" ]]; then
+            local cached_version=""
+            cached_version=$(_force_get_cached_version "surge-networks/snell" 2>/dev/null)
+            if [[ -n "$cached_version" ]]; then
+                _warn "获取最新${channel_label}失败，使用缓存版本 v$cached_version"
+                version="$cached_version"
+            fi
+        fi
+    fi
+    [[ -z "$version" ]] && version="$SNELL_DEFAULT_VERSION"
+    if [[ ! "$version" =~ ^[0-9A-Za-z._-]+$ ]]; then
+        _err "无效的版本号格式: $version"
+        return 1
+    fi
     local tmp=$(mktemp -d)
     if curl -sLo "$tmp/snell.zip" --connect-timeout 60 "https://dl.nssurge.com/snell/snell-server-v${version}-linux-${sarch}.zip"; then
         unzip -oq "$tmp/snell.zip" -d "$tmp/" && install -m 755 "$tmp/snell-server" /usr/local/bin/snell-server-v5
@@ -16027,45 +16750,26 @@ main_menu() {
         # 获取内核版本
         local kernel_version=$(uname -r)
 
-        # 获取本地核心版本信息（立即显示）
-        local xray_ver="未安装" singbox_ver="未安装"
-        local xray_status="" singbox_status=""
+        # 初始化版本缓存（确保缓存目录存在）
+        _init_version_cache
 
-        if check_cmd xray; then
-            # 只提取版本号，过滤掉其他输出
-            xray_ver=$(xray version 2>/dev/null | head -n 1 | awk '{print $2}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
-            [[ -z "$xray_ver" ]] && xray_ver="未知"
-        fi
-
-        if check_cmd sing-box; then
-            # 只提取版本号，过滤掉其他输出
-            singbox_ver=$(sing-box version 2>/dev/null | awk '{print $3}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
-            [[ -z "$singbox_ver" ]] && singbox_ver="未知"
-        fi
+        # 获取核心版本及状态（使用公共方法）
+        local xray_ver_with_status singbox_ver_with_status
+        xray_ver_with_status=$(_get_core_version_with_status "xray" "XTLS/Xray-core")
+        singbox_ver_with_status=$(_get_core_version_with_status "sing-box" "SagerNet/sing-box")
 
         # 启动异步版本检查（后台，仅首次进入时触发）
         if [[ -z "$_version_check_started" ]]; then
-            _check_version_updates_async "$xray_ver" "$singbox_ver"
+            local xray_current singbox_current
+            xray_current=$(_get_core_version "xray")
+            singbox_current=$(_get_core_version "sing-box")
+            _check_version_updates_async "$xray_current" "$singbox_current"
             _version_check_started=1
         fi
 
-        # 检查是否有版本更新（非阻塞，立即返回）
-        if _has_version_updates; then
-            # 检测到更新，更新状态变量
-            local xray_latest=$(_get_version_update_info "xray")
-            local singbox_latest=$(_get_version_update_info "singbox")
-
-            if [[ -n "$xray_latest" ]]; then
-                xray_status=" ${Y}↑${NC}"
-            fi
-            if [[ -n "$singbox_latest" ]]; then
-                singbox_status=" ${Y}↑${NC}"
-            fi
-        fi
-
-        # 显示版本信息（带或不带更新箭头）
-        echo -e "  ${D}系统: ${os_version} | 内核: ${kernel_version}${NC}"
-        echo -e "  ${D}核心: Xray ${xray_ver}${xray_status} | Sing-box ${singbox_ver}${singbox_status}${NC}"
+        # 显示版本信息（已包含状态标识）
+        echo -e "  ${D}系统: ${os_version} | ${kernel_version}${NC}"
+        echo -e "  ${D}核心: Xray ${xray_ver_with_status} | Sing-box ${singbox_ver_with_status}${NC}"
         echo ""
         show_status
         echo ""
