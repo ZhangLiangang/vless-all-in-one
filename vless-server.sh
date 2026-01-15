@@ -8520,10 +8520,12 @@ _select_outbound() {
     local prompt="${1:-选择出口}"
     local outbounds=()
     local display_names=()
+    local node_credentials=()  # 存储节点的用户名密码
     
     # 直连出口（优先级最高）
     outbounds+=("direct")
     display_names+=("DIRECT")
+    node_credentials+=("")
     
     # 获取节点完整信息
     local nodes=$(db_get_chain_nodes 2>/dev/null)
@@ -8534,15 +8536,24 @@ _select_outbound() {
     if [[ "$warp_st" == "configured" || "$warp_st" == "connected" ]]; then
         outbounds+=("warp")
         display_names+=("WARP")
+        node_credentials+=("")
     fi
     
-    # 链式代理节点
+    # 链式代理节点 - 获取完整信息包括用户名密码
     if [[ "$node_count" -gt 0 ]]; then
-        while IFS=$'\t' read -r name type server port; do
+        while IFS= read -r node_json; do
+            [[ -z "$node_json" ]] && continue
+            local name=$(echo "$node_json" | jq -r '.name // ""')
+            local type=$(echo "$node_json" | jq -r '.type // ""')
+            local server=$(echo "$node_json" | jq -r '.server // ""')
+            local port=$(echo "$node_json" | jq -r '.port // ""')
+            local username=$(echo "$node_json" | jq -r '.username // ""')
+            local password=$(echo "$node_json" | jq -r '.password // ""')
             [[ -z "$name" ]] && continue
             outbounds+=("chain:${name}")
             display_names+=("${name}"$'\t'"${type}"$'\t'"${server}"$'\t'"${port}")
-        done < <(echo "$nodes" | jq -r '.[] | [.name, .type, .server, .port] | @tsv')
+            node_credentials+=("${username}"$'\t'"${password}")
+        done < <(echo "$nodes" | jq -c '.[]')
     fi
     
     # 检测延迟（跳过直连和 WARP）
@@ -8560,14 +8571,18 @@ _select_outbound() {
     
     local latency_results=()
     local idx=0
-    for info in "${display_names[@]}"; do
+    for i in "${!display_names[@]}"; do
+        local info="${display_names[$i]}"
+        local creds="${node_credentials[$i]}"
         if [[ "$info" == "DIRECT" || "$info" == "WARP" ]]; then
             latency_results+=("-|$info|-")
         else
             local node_type=$(echo "$info" | cut -d$'\t' -f2)
             local server=$(echo "$info" | cut -d$'\t' -f3)
             local port=$(echo "$info" | cut -d$'\t' -f4)
-            local result=$(check_node_latency "$server" "$port" "$node_type" 2>/dev/null)
+            local username=$(echo "$creds" | cut -d$'\t' -f1)
+            local password=$(echo "$creds" | cut -d$'\t' -f2)
+            local result=$(check_node_latency "$server" "$port" "$node_type" "$username" "$password" 2>/dev/null)
             latency_results+=("$result")
         fi
         ((idx++))
@@ -10688,10 +10703,10 @@ manage_routing() {
 #═══════════════════════════════════════════════════════════════════════════════
 
 # 检测节点延迟和解析 IP
-# 用法: check_node_latency "server" "port" ["proto"]
-# 返回: "延迟ms|IP" 或 "超时|-"
+# 用法: check_node_latency "server" "port" ["proto"] ["username"] ["password"]
+# 返回: "延迟ms|出口IP" 或 "超时|-"
 check_node_latency() {
-    local server="$1" port="$2" proto="${3:-tcp}"
+    local server="$1" port="$2" proto="${3:-tcp}" username="${4:-}" password="${5:-}"
     local resolved_ip="" latency=""
     local is_ipv6=false
     
@@ -10701,17 +10716,13 @@ check_node_latency() {
     
     # 判断地址类型
     if [[ "$server" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        # IPv4 地址
         resolved_ip="$server"
     elif [[ "$server" =~ : ]]; then
-        # IPv6 地址 (包含冒号)
         resolved_ip="$server"
         is_ipv6=true
     else
-        # 域名，尝试解析
         resolved_ip=$(dig +short "$server" A 2>/dev/null | grep -E '^[0-9]+\.' | head -1)
         if [[ -z "$resolved_ip" ]]; then
-            # 尝试解析 IPv6
             resolved_ip=$(dig +short "$server" AAAA 2>/dev/null | grep -E ':' | head -1)
             [[ -n "$resolved_ip" ]] && is_ipv6=true
         fi
@@ -10722,13 +10733,61 @@ check_node_latency() {
     local start_time end_time
     start_time=$(date +%s%3N)
     
-    # UDP 协议 (hy2/tuic) 或 IPv6 地址使用 ICMP ping
-    if [[ "$proto" == "hysteria2" || "$proto" == "hy2" || "$proto" == "tuic" || "$is_ipv6" == "true" ]]; then
+    # SOCKS5 代理：通过代理发起 HTTP 请求测真实出口延迟和出口 IP
+    if [[ "$proto" == "socks" || "$proto" == "socks5" ]]; then
+        local proxy_url=""
+        local server_fmt="$server"
+        [[ "$is_ipv6" == "true" ]] && server_fmt="[$server]"
+        
+        if [[ -n "$username" && -n "$password" ]]; then
+            proxy_url="socks5h://${username}:${password}@${server_fmt}:${port}"
+        else
+            proxy_url="socks5h://${server_fmt}:${port}"
+        fi
+        
+        # 通过代理获取出口 IP 并测量延迟
+        local exit_ip
+        exit_ip=$(curl -x "$proxy_url" -s --connect-timeout 5 --max-time 10 "http://ip.sb" 2>/dev/null)
+        if [[ -n "$exit_ip" && "$exit_ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
+            end_time=$(date +%s%3N)
+            latency=$((end_time - start_time))
+            echo "${latency}|${exit_ip}"
+        else
+            echo "超时|-"
+        fi
+        return
+    fi
+    
+    # HTTP 代理：通过代理发起 HTTP 请求测真实出口延迟和出口 IP
+    if [[ "$proto" == "http" ]]; then
+        local proxy_url=""
+        local server_fmt="$server"
+        [[ "$is_ipv6" == "true" ]] && server_fmt="[$server]"
+        
+        if [[ -n "$username" && -n "$password" ]]; then
+            proxy_url="http://${username}:${password}@${server_fmt}:${port}"
+        else
+            proxy_url="http://${server_fmt}:${port}"
+        fi
+        
+        local exit_ip
+        exit_ip=$(curl -x "$proxy_url" -s --connect-timeout 5 --max-time 10 "http://ip.sb" 2>/dev/null)
+        if [[ -n "$exit_ip" && "$exit_ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
+            end_time=$(date +%s%3N)
+            latency=$((end_time - start_time))
+            echo "${latency}|${exit_ip}"
+        else
+            echo "超时|-"
+        fi
+        return
+    fi
+    
+    # UDP 协议 (hy2/tuic) 使用 ICMP ping
+    if [[ "$proto" == "hysteria2" || "$proto" == "hy2" || "$proto" == "tuic" ]]; then
         local ping_target="$server"
         [[ "$resolved_ip" != "-" ]] && ping_target="$resolved_ip"
         
         if [[ "$is_ipv6" == "true" ]]; then
-            # IPv6 使用 ping6 或 ping -6
             if command -v ping6 &>/dev/null; then
                 if ping6 -c 1 -W 2 "$ping_target" &>/dev/null; then
                     end_time=$(date +%s%3N)
@@ -10743,7 +10802,6 @@ check_node_latency() {
                 latency="超时"
             fi
         else
-            # IPv4 使用普通 ping
             if ping -c 1 -W 2 "$ping_target" &>/dev/null; then
                 end_time=$(date +%s%3N)
                 latency=$((end_time - start_time))
@@ -10751,29 +10809,28 @@ check_node_latency() {
                 latency="超时"
             fi
         fi
-    else
-        # TCP 协议使用 TCP 连接测试
-        local connect_addr="$server"
-        
-        # IPv6 地址需要用方括号包裹 (用于 bash /dev/tcp)
-        if [[ "$is_ipv6" == "true" || "$server" =~ : ]]; then
-            connect_addr="[$server]"
-        fi
-        
-        # 优先用 nc，对 IPv6 支持更好
-        if command -v nc &>/dev/null; then
-            if timeout 3 nc -z -w 2 "$server" "$port" 2>/dev/null; then
-                end_time=$(date +%s%3N)
-                latency=$((end_time - start_time))
-            else
-                latency="超时"
-            fi
-        elif timeout 3 bash -c "echo >/dev/tcp/${connect_addr}/$port" 2>/dev/null; then
+        echo "${latency}|${resolved_ip}"
+        return
+    fi
+    
+    # 其他 TCP 协议使用 TCP 连接测试
+    local connect_addr="$server"
+    if [[ "$is_ipv6" == "true" || "$server" =~ : ]]; then
+        connect_addr="[$server]"
+    fi
+    
+    if command -v nc &>/dev/null; then
+        if timeout 3 nc -z -w 2 "$server" "$port" 2>/dev/null; then
             end_time=$(date +%s%3N)
             latency=$((end_time - start_time))
         else
             latency="超时"
         fi
+    elif timeout 3 bash -c "echo >/dev/tcp/${connect_addr}/$port" 2>/dev/null; then
+        end_time=$(date +%s%3N)
+        latency=$((end_time - start_time))
+    else
+        latency="超时"
     fi
     
     echo "${latency}|${resolved_ip}"
@@ -11726,12 +11783,13 @@ _import_subscription_interactive() {
 }
 
 # 链式代理管理菜单
-# 一键导入 Alice 台湾家宽节点 (8个出口)
+# 一键导入 Alice SOCKS5 节点 (8个出口)
 _import_alice_nodes() {
     _header
-    echo -e "  ${W}导入 Alice 台湾家宽节点${NC}"
+    echo -e "  ${W}导入 Alice SOCKS5 节点${NC}"
     _line
-    echo -e "  ${D}Alice 提供 8 个台湾家宽出口 (端口 10001-10008)${NC}"
+    echo -e "  ${D}Alice 提供 8 个 SOCKS5 出口 (端口 10001-10008)${NC}"
+    echo -e "  ${D}将自动检测出口 IP 和地区进行命名${NC}"
     echo ""
     
     local server="2a14:67c0:116::1"
@@ -11740,17 +11798,59 @@ _import_alice_nodes() {
     local base_port=10001
     local imported=0
     local skipped=0
+    local failed=0
     
-    echo -e "  ${C}▸${NC} 开始导入..."
+    echo -e "  ${C}▸${NC} 开始检测并导入..."
     echo ""
     
     for i in {1..8}; do
         local port=$((base_port + i - 1))
-        local name="Alice-台湾家宽-${i}"
+        printf "  检测端口 %d... " "$port"
+        
+        # 构建代理 URL
+        local proxy_url="socks5h://${username}:${password}@[${server}]:${port}"
+        
+        # 通过代理获取出口 IP 和地区信息
+        local ip_info
+        ip_info=$(curl -x "$proxy_url" -s --connect-timeout 5 --max-time 10 "http://ip-api.com/json/?fields=query,countryCode" 2>/dev/null)
+        
+        if [[ -z "$ip_info" ]]; then
+            echo -e "${R}超时${NC}"
+            ((failed++))
+            continue
+        fi
+        
+        local exit_ip=$(echo "$ip_info" | jq -r '.query // ""' 2>/dev/null)
+        local country=$(echo "$ip_info" | jq -r '.countryCode // ""' 2>/dev/null)
+        
+        if [[ -z "$exit_ip" || "$exit_ip" == "null" ]]; then
+            echo -e "${R}获取IP失败${NC}"
+            ((failed++))
+            continue
+        fi
+        
+        # 获取 IP 最后一段
+        local ip_suffix=""
+        if [[ "$exit_ip" =~ \. ]]; then
+            # IPv4: 取最后一段
+            ip_suffix="${exit_ip##*.}"
+        else
+            # IPv6: 取最后4位
+            ip_suffix="${exit_ip##*:}"
+            ip_suffix="${ip_suffix: -4}"
+        fi
+        
+        # 地区默认值
+        [[ -z "$country" || "$country" == "null" ]] && country="XX"
+        
+        # 生成节点名称: Alice-HK-SOCKS5-123
+        local name="Alice-${country}-SOCKS5-${ip_suffix}"
+        
+        echo -e "${G}${exit_ip}${NC} → ${C}${name}${NC}"
         
         # 检查是否已存在
         if db_chain_node_exists "$name"; then
-            echo -e "  ${Y}⊘${NC} $name ${D}(已存在，跳过)${NC}"
+            echo -e "    ${Y}⊘${NC} 已存在，跳过"
             ((skipped++))
             continue
         fi
@@ -11765,10 +11865,10 @@ _import_alice_nodes() {
             '{name:$name,type:"socks",server:$server,port:$port,username:$username,password:$password}')
         
         if db_add_chain_node "$node"; then
-            echo -e "  ${G}✓${NC} $name ${D}(端口: $port)${NC}"
             ((imported++))
         else
-            echo -e "  ${R}✗${NC} $name ${D}(添加失败)${NC}"
+            echo -e "    ${R}✗${NC} 添加失败"
+            ((failed++))
         fi
     done
     
@@ -11776,11 +11876,13 @@ _import_alice_nodes() {
     _line
     if [[ $imported -gt 0 ]]; then
         _ok "成功导入 $imported 个节点"
-        [[ $skipped -gt 0 ]] && _info "跳过 $skipped 个已存在节点"
+    fi
+    [[ $skipped -gt 0 ]] && _info "跳过 $skipped 个已存在节点"
+    [[ $failed -gt 0 ]] && _warn "失败 $failed 个节点"
+    
+    if [[ $imported -gt 0 ]]; then
         echo ""
         echo -e "  ${Y}提示:${NC} 请到 ${C}分流规则${NC} 中配置使用这些节点"
-    else
-        _info "没有新节点导入 (已存在 $skipped 个)"
     fi
     _pause
 }
@@ -11823,7 +11925,7 @@ manage_chain_proxy() {
         
         _item "1" "添加节点 (分享链接)"
         _item "2" "导入订阅"
-        _item "3" "一键导入 Alice 台湾家宽"
+        _item "3" "一键导入 Alice SOCKS5 (8节点)"
         _item "4" "测试所有节点延迟"
         _item "5" "删除节点"
         _item "6" "禁用链式代理"
@@ -11876,10 +11978,18 @@ manage_chain_proxy() {
                 # 先收集所有节点信息到临时文件
                 local tmp_results=$(mktemp)
                 local i=0
-                # 使用 tab 分隔避免节点名称中的 | 干扰解析
-                while IFS=$'\t' read -r name type server port; do
+                # 遍历节点，获取完整信息（包括用户名密码）
+                while IFS= read -r node_json; do
+                    [[ -z "$node_json" ]] && continue
+                    local name=$(echo "$node_json" | jq -r '.name // ""')
+                    local type=$(echo "$node_json" | jq -r '.type // ""')
+                    local server=$(echo "$node_json" | jq -r '.server // ""')
+                    local port=$(echo "$node_json" | jq -r '.port // ""')
+                    local username=$(echo "$node_json" | jq -r '.username // ""')
+                    local password=$(echo "$node_json" | jq -r '.password // ""')
                     [[ -z "$server" ]] && continue
-                    local result=$(check_node_latency "$server" "$port" "$type")
+                    
+                    local result=$(check_node_latency "$server" "$port" "$type" "$username" "$password")
                     local latency="${result%%|*}"
                     local resolved_ip="${result##*|}"
                     local latency_num=99999
@@ -11887,7 +11997,7 @@ manage_chain_proxy() {
                     echo "${latency_num}|${latency}|${name}|${type}|${resolved_ip}" >> "$tmp_results"
                     ((i++))
                     printf "\r  ${C}▸${NC} 检测中... (%d/%d)  " "$i" "$count" >&2
-                done < <(echo "$nodes" | jq -r '.[] | [.name, .type, .server, .port] | @tsv')
+                done < <(echo "$nodes" | jq -c '.[]')
                 
                 echo ""
                 _ok "延迟检测完成 ($count 个节点)"
